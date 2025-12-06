@@ -1,0 +1,13 @@
+# Environment variables
+.env
+
+# Binaries
+*.exe
+*.dll
+*.so
+*.dylib
+bin/
+
+# IDE directories
+.vscode/
+.idea/

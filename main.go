@@ -12,6 +12,9 @@ import (
 	"gorm.io/gorm"
 )
 
+// --- MODELOS ---
+
+// Ofertas (Para el mapa)
 type OfferResponse struct {
 	ID          uint    `json:"id"`
 	Title       string  `json:"title"`
@@ -23,41 +26,58 @@ type OfferResponse struct {
 	Distance    float64 `json:"distance_meters"`
 }
 
+// Vehículos (Para el usuario)
+type Vehicle struct {
+	ID       uint   `gorm:"primaryKey" json:"id"`
+	UserID   string `gorm:"index" json:"user_id"`
+	Type     string `json:"type"` // 'car' o 'moto'
+	Brand    string `json:"brand"`
+	Model    string `json:"model"`
+	Year     int    `json:"year"`
+	IsActive bool   `gorm:"default:true" json:"is_active"`
+}
+
 var db *gorm.DB
 
 func main() {
-	// Cargar variables de entorno
-	if err := godotenv.Load(); err != nil {
-		log.Println("⚠️ Advertencia: No se pudo cargar el archivo .env, buscando variables de entorno del sistema:", err)
-	}
+	_ = godotenv.Load()
 
-	// 2. CONEXIÓN A BASE DE DATOS
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {
-		log.Fatal("❌ Error: DATABASE_URL no está configurada en el archivo .env")
+		log.Fatal("❌ Error: DATABASE_URL no configurada")
 	}
 
 	var err error
 	db, err = gorm.Open(postgres.Open(dsn), &gorm.Config{})
 	if err != nil {
-		log.Fatal("❌ Falló la conexión a la base de datos:", err)
+		log.Fatal("❌ Error DB:", err)
 	}
-	log.Println("✅ Conectado a PostgreSQL + PostGIS en Render")
 
-	// 3. CONFIGURAR EL ROUTER
+	// Migración automática (Crea tablas si no existen, útil como respaldo)
+	db.AutoMigrate(&Vehicle{})
+
 	r := gin.Default()
 
-	// Middleware CORS básico
+	// CORS (Permitir acceso desde la App)
 	r.Use(func(c *gin.Context) {
 		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
+		c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE")
+		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		if c.Request.Method == "OPTIONS" {
+			c.AbortWithStatus(204)
+			return
+		}
 		c.Next()
 	})
 
 	r.GET("/", func(c *gin.Context) {
-		c.JSON(200, gin.H{"status": "online", "message": "Zona Flash API ⚡"})
+		c.JSON(200, gin.H{"status": "online ⚡"})
 	})
 
-	r.GET("/api/offers", getNearbyOffers)
+	// --- RUTAS ---
+	r.GET("/api/offers", getNearbyOffers)            // Buscar ofertas
+	r.POST("/api/vehicles", createVehicle)           // Guardar vehículo
+	r.GET("/api/vehicles/:user_id", getUserVehicles) // Consultar vehículos
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -66,13 +86,37 @@ func main() {
 	r.Run(":" + port)
 }
 
+// --- CONTROLADORES ---
+
+func createVehicle(c *gin.Context) {
+	var v Vehicle
+	if err := c.ShouldBindJSON(&v); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	// Guardar en DB
+	result := db.Create(&v)
+	if result.Error != nil {
+		c.JSON(500, gin.H{"error": "Error guardando vehículo"})
+		return
+	}
+	c.JSON(201, v)
+}
+
+func getUserVehicles(c *gin.Context) {
+	userID := c.Param("user_id")
+	var vehicles []Vehicle
+	db.Where("user_id = ?", userID).Find(&vehicles)
+	c.JSON(200, vehicles)
+}
+
 func getNearbyOffers(c *gin.Context) {
 	latStr := c.Query("lat")
 	lngStr := c.Query("lng")
 	radiusStr := c.Query("radius")
 
 	if latStr == "" || lngStr == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Faltan coordenadas (lat, lng)"})
+		c.JSON(400, gin.H{"error": "Faltan lat/lng"})
 		return
 	}
 
@@ -84,27 +128,16 @@ func getNearbyOffers(c *gin.Context) {
 	}
 
 	var offers []OfferResponse
-
-	// Consulta PostGIS optimizada
+	// Consulta Geoespacial
 	query := `
-		SELECT 
-			id, title, description, price, category,
-			ST_Y(location::geometry) as latitude,
-			ST_X(location::geometry) as longitude,
-			ST_Distance(location, ST_MakePoint(?, ?)::geography) as distance_meters
+		SELECT id, title, description, price, category,
+		ST_Y(location::geometry) as latitude, ST_X(location::geometry) as longitude,
+		ST_Distance(location, ST_MakePoint(?, ?)::geography) as distance_meters
 		FROM offers
 		WHERE ST_DWithin(location, ST_MakePoint(?, ?)::geography, ?)
 		AND is_active = TRUE
-		ORDER BY distance_meters ASC
-		LIMIT 50;
-	`
+		ORDER BY distance_meters ASC LIMIT 50;`
 
-	result := db.Raw(query, lng, lat, lng, lat, radius).Scan(&offers)
-
-	if result.Error != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": result.Error.Error()})
-		return
-	}
-
-	c.JSON(http.StatusOK, offers)
+	db.Raw(query, lng, lat, lng, lat, radius).Scan(&offers)
+	c.JSON(200, offers)
 }

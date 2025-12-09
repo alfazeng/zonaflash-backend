@@ -21,6 +21,7 @@ type OfferResponse struct {
 	Description string  `json:"description"`
 	Price       float64 `json:"price"`
 	Category    string  `json:"category"`
+	Status      string  `json:"status"` // <--- NUEVO CAMPO: 'active', 'flash', 'suspended'
 	Latitude    float64 `json:"latitude"`
 	Longitude   float64 `json:"longitude"`
 	Distance    float64 `json:"distance_meters"`
@@ -128,14 +129,19 @@ func getNearbyOffers(c *gin.Context) {
 	}
 
 	var offers []OfferResponse
-	// Consulta Geoespacial
+	// Consulta Geoespacial ACTUALIZADA
+	// Ahora seleccionamos también el campo 'status'
 	query := `
-		SELECT id, title, description, price, category,
-		ST_Y(location::geometry) as latitude, ST_X(location::geometry) as longitude,
-		ST_Distance(location, ST_MakePoint(?, ?)::geography) as distance_meters
+		SELECT 
+            id, title, description, price, category, status,
+		    ST_Y(location::geometry) as latitude, 
+            ST_X(location::geometry) as longitude,
+		    ST_Distance(location, ST_MakePoint(?, ?)::geography) as distance_meters
 		FROM offers
 		WHERE ST_DWithin(location, ST_MakePoint(?, ?)::geography, ?)
-		AND is_active = TRUE
+		-- Nota: Ya no filtramos por "is_active = TRUE" aquí, porque queremos traer
+        -- incluso las suspendidas (status='suspended') para mostrarlas en GRIS en el mapa.
+        -- El filtro visual lo hace el Frontend.
 		ORDER BY distance_meters ASC LIMIT 50;`
 
 	db.Raw(query, lng, lat, lng, lat, radius).Scan(&offers)

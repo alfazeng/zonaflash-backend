@@ -38,6 +38,16 @@ type Vehicle struct {
 	IsActive bool   `gorm:"default:true" json:"is_active"`
 }
 
+// Wallet (Billetera del usuario)
+type Wallet struct {
+	UserID         string  `gorm:"primaryKey" json:"user_id"`
+	Balance        float64 `json:"balance"`
+	LifetimePoints float64 `json:"lifetime_points"`
+	Goal           float64 `gorm:"default:500" json:"goal"`
+	Status         string  `gorm:"default:'active'" json:"status"` // 'active', 'pending', 'frozen'
+	LevelName      string  `gorm:"default:'Novato'" json:"level_name"`
+}
+
 var db *gorm.DB
 
 func main() {
@@ -55,7 +65,7 @@ func main() {
 	}
 
 	// Migración automática (Crea tablas si no existen, útil como respaldo)
-	db.AutoMigrate(&Vehicle{})
+	db.AutoMigrate(&Vehicle{}, &Wallet{})
 
 	r := gin.Default()
 
@@ -79,6 +89,9 @@ func main() {
 	r.GET("/api/offers", getNearbyOffers)            // Buscar ofertas
 	r.POST("/api/vehicles", createVehicle)           // Guardar vehículo
 	r.GET("/api/vehicles/:user_id", getUserVehicles) // Consultar vehículos
+	// Wallet
+	r.GET("/api/wallet/:user_id", getWallet)
+	r.POST("/api/wallet/redeem", requestRedeem)
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -129,8 +142,8 @@ func getNearbyOffers(c *gin.Context) {
 	}
 
 	var offers []OfferResponse
-	// Consulta Geoespacial ACTUALIZADA
-	// Ahora seleccionamos también el campo 'status'
+	// Consulta Geoespacial
+	// Seleccionamos 'status' para que el frontend decida el color del pin (Amarillo/Rojo/Gris)
 	query := `
 		SELECT 
             id, title, description, price, category, status,
@@ -139,11 +152,54 @@ func getNearbyOffers(c *gin.Context) {
 		    ST_Distance(location, ST_MakePoint(?, ?)::geography) as distance_meters
 		FROM offers
 		WHERE ST_DWithin(location, ST_MakePoint(?, ?)::geography, ?)
-		-- Nota: Ya no filtramos por "is_active = TRUE" aquí, porque queremos traer
-        -- incluso las suspendidas (status='suspended') para mostrarlas en GRIS en el mapa.
-        -- El filtro visual lo hace el Frontend.
 		ORDER BY distance_meters ASC LIMIT 50;`
 
 	db.Raw(query, lng, lat, lng, lat, radius).Scan(&offers)
 	c.JSON(200, offers)
+}
+
+func getWallet(c *gin.Context) {
+	userID := c.Param("user_id")
+	var wallet Wallet
+
+	// Buscar billetera, si no existe, crearla
+	if result := db.First(&wallet, "user_id = ?", userID); result.Error != nil {
+		wallet = Wallet{
+			UserID:         userID,
+			Balance:        0,
+			LifetimePoints: 0,
+			Goal:           500,
+			Status:         "active",
+			LevelName:      "Novato",
+		}
+		db.Create(&wallet)
+	}
+	c.JSON(200, wallet)
+}
+
+func requestRedeem(c *gin.Context) {
+	var req struct {
+		UserID string `json:"user_id"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(400, gin.H{"error": "Falta user_id"})
+		return
+	}
+
+	var wallet Wallet
+	if err := db.First(&wallet, "user_id = ?", req.UserID).Error; err != nil {
+		c.JSON(404, gin.H{"error": "Wallet no encontrada"})
+		return
+	}
+
+	if wallet.Balance < wallet.Goal {
+		c.JSON(400, gin.H{"error": "Saldo insuficiente"})
+		return
+	}
+
+	// Actualizar estado
+	wallet.Status = "pending"
+	db.Save(&wallet)
+
+	c.JSON(200, gin.H{"message": "Solicitud recibida", "new_status": "pending"})
 }

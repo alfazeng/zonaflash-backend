@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
@@ -48,6 +49,28 @@ type Wallet struct {
 	LevelName      string  `gorm:"default:'Novato'" json:"level_name"`
 }
 
+// Location (Puntos cazados)
+type Location struct {
+	ID        uint    `gorm:"primaryKey" json:"id"`
+	UserID    string  `gorm:"index" json:"user_id"`
+	ShopName  string  `json:"shop_name"`
+	Category  string  `json:"category"`
+	PhotoURL  string  `json:"photo_url"`
+	Latitude  float64 `json:"latitude"`
+	Longitude float64 `json:"longitude"`
+	Status    string  `gorm:"default:'pending'" json:"status"` // 'pending', 'approved', 'rejected'
+}
+
+// Transaction (Historial de puntos)
+type Transaction struct {
+	ID          uint      `gorm:"primaryKey" json:"id"`
+	UserID      string    `gorm:"index" json:"user_id"`
+	Type        string    `json:"type"` // 'earning'
+	Amount      float64   `json:"amount"`
+	Description string    `json:"description"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
 var db *gorm.DB
 
 func main() {
@@ -65,7 +88,7 @@ func main() {
 	}
 
 	// Migración automática (Crea tablas si no existen, útil como respaldo)
-	db.AutoMigrate(&Vehicle{}, &Wallet{})
+	db.AutoMigrate(&Vehicle{}, &Wallet{}, &Location{}, &Transaction{})
 
 	r := gin.Default()
 
@@ -90,8 +113,11 @@ func main() {
 	r.POST("/api/vehicles", createVehicle)           // Guardar vehículo
 	r.GET("/api/vehicles/:user_id", getUserVehicles) // Consultar vehículos
 	// Wallet
+	// Wallet
 	r.GET("/api/wallet/:user_id", getWallet)
 	r.POST("/api/wallet/redeem", requestRedeem)
+	// Hunter
+	r.POST("/api/hunter/submit", submitHuntHandler)
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -202,4 +228,67 @@ func requestRedeem(c *gin.Context) {
 	db.Save(&wallet)
 
 	c.JSON(200, gin.H{"message": "Solicitud recibida", "new_status": "pending"})
+}
+
+func submitHuntHandler(c *gin.Context) {
+	var req struct {
+		UserID    string  `json:"user_id"`
+		ShopName  string  `json:"shop_name"`
+		PhotoURL  string  `json:"photo_url"`
+		Category  string  `json:"category"`
+		Latitude  float64 `json:"latitude"`
+		Longitude float64 `json:"longitude"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(400, gin.H{"error": err.Error()})
+		return
+	}
+
+	tx := db.Begin()
+
+	// 1. Insert Location
+	loc := Location{
+		UserID:    req.UserID,
+		ShopName:  req.ShopName,
+		Category:  req.Category,
+		PhotoURL:  req.PhotoURL,
+		Latitude:  req.Latitude,
+		Longitude: req.Longitude,
+		Status:    "pending",
+	}
+	if err := tx.Create(&loc).Error; err != nil {
+		tx.Rollback()
+		c.JSON(500, gin.H{"error": "Error creating location"})
+		return
+	}
+
+	// 2. Insert Transaction
+	trans := Transaction{
+		UserID:      req.UserID,
+		Type:        "earning",
+		Amount:      10,
+		Description: "Caza: " + req.ShopName,
+		CreatedAt:   time.Now(),
+	}
+	if err := tx.Create(&trans).Error; err != nil {
+		tx.Rollback()
+		c.JSON(500, gin.H{"error": "Error creating transaction"})
+		return
+	}
+
+	// 3. Upsert Wallet
+	// Usamos raw SQL para upsert atómico y sencillo
+	if err := tx.Exec(`
+        INSERT INTO wallets (user_id, balance, lifetime_points, goal, status, level_name) 
+        VALUES (?, 10, 10, 500, 'active', 'Novato') 
+        ON CONFLICT (user_id) 
+        DO UPDATE SET balance = wallets.balance + 10, lifetime_points = wallets.lifetime_points + 10
+    `, req.UserID).Error; err != nil {
+		tx.Rollback()
+		c.JSON(500, gin.H{"error": "Error updating wallet"})
+		return
+	}
+
+	tx.Commit()
+	c.JSON(200, gin.H{"message": "Hunt submitted successfully", "points": 10})
 }

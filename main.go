@@ -51,14 +51,18 @@ type Wallet struct {
 
 // Location (Puntos cazados)
 type Location struct {
-	ID        uint    `gorm:"primaryKey" json:"id"`
-	UserID    string  `gorm:"index" json:"user_id"`
-	ShopName  string  `json:"shop_name"`
-	Category  string  `json:"category"`
-	PhotoURL  string  `json:"photo_url"`
-	Latitude  float64 `json:"latitude"`
-	Longitude float64 `json:"longitude"`
-	Status    string  `gorm:"default:'pending'" json:"status"` // 'pending', 'approved', 'rejected'
+	ID               uint        `gorm:"primaryKey" json:"id"`
+	UserID           string      `gorm:"index" json:"user_id"`
+	ShopName         string      `json:"shop_name"`
+	Category         string      `json:"category"`
+	PhotoURL         string      `json:"photo_url"`
+	Latitude         float64     `json:"latitude"`
+	Longitude        float64     `json:"longitude"`
+	Status           string      `gorm:"default:'pending'" json:"status"` // 'pending', 'approved', 'rejected'
+	IsShadow         bool        `json:"is_shadow"`
+	ActivationStatus string      `json:"activation_status"`
+	AssetType        string      `json:"asset_type"`
+	Geom             interface{} `gorm:"type:geography(POINT,4326)" json:"-"`
 }
 
 // Transaction (Historial de puntos)
@@ -86,6 +90,9 @@ func main() {
 	if err != nil {
 		log.Fatal("❌ Error DB:", err)
 	}
+
+	// 0. Asegurar PostGIS
+	db.Exec("CREATE EXTENSION IF NOT EXISTS postgis;")
 
 	// Migración automática (Crea tablas si no existen, útil como respaldo)
 	db.AutoMigrate(&Vehicle{}, &Wallet{}, &Location{}, &Transaction{})
@@ -232,15 +239,32 @@ func requestRedeem(c *gin.Context) {
 
 func submitHuntHandler(c *gin.Context) {
 	var req struct {
-		UserID    string  `json:"user_id"`
-		ShopName  string  `json:"shop_name"`
-		PhotoURL  string  `json:"photo_url"`
-		Category  string  `json:"category"`
-		Latitude  float64 `json:"latitude"`
-		Longitude float64 `json:"longitude"`
+		UserID           string  `json:"user_id"`
+		ShopName         string  `json:"shop_name"`
+		PhotoURL         string  `json:"photo_url"`
+		Category         string  `json:"category"`
+		Latitude         float64 `json:"latitude"`
+		Longitude        float64 `json:"longitude"`
+		IsShadow         bool    `json:"is_shadow"`
+		ActivationStatus string  `json:"activation_status"`
+		AssetType        string  `json:"asset_type"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(400, gin.H{"error": err.Error()})
+		return
+	}
+
+	// 0. PROXIMITY CHECK (Anti-Duplicado) - 20 metros
+	var count int64
+	checkQuery := `
+		SELECT count(*) 
+		FROM locations 
+		WHERE category = ? 
+		AND ST_DWithin(geom, ST_SetSRID(ST_MakePoint(?, ?), 4326)::geography, 20)`
+	db.Raw(checkQuery, req.Category, req.Longitude, req.Latitude).Scan(&count)
+
+	if count > 0 {
+		c.JSON(http.StatusConflict, gin.H{"error": "Este punto ya ha sido capturado recientemente"})
 		return
 	}
 
@@ -248,17 +272,29 @@ func submitHuntHandler(c *gin.Context) {
 
 	// 1. Insert Location
 	loc := Location{
-		UserID:    req.UserID,
-		ShopName:  req.ShopName,
-		Category:  req.Category,
-		PhotoURL:  req.PhotoURL,
-		Latitude:  req.Latitude,
-		Longitude: req.Longitude,
-		Status:    "pending",
+		UserID:           req.UserID,
+		ShopName:         req.ShopName,
+		Category:         req.Category,
+		PhotoURL:         req.PhotoURL,
+		Latitude:         req.Latitude,
+		Longitude:        req.Longitude,
+		Status:           "pending",
+		IsShadow:         req.IsShadow,
+		ActivationStatus: req.ActivationStatus,
+		AssetType:        req.AssetType,
 	}
+
+	// 1.1 Poblar Geom manualmente para PostGIS
 	if err := tx.Create(&loc).Error; err != nil {
 		tx.Rollback()
 		c.JSON(500, gin.H{"error": "Error creating location"})
+		return
+	}
+
+	updateGeom := "UPDATE locations SET geom = ST_SetSRID(ST_MakePoint(?, ?), 4326)::geography WHERE id = ?"
+	if err := tx.Exec(updateGeom, req.Longitude, req.Latitude, loc.ID).Error; err != nil {
+		tx.Rollback()
+		c.JSON(500, gin.H{"error": "Error updating geography"})
 		return
 	}
 

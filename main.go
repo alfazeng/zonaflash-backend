@@ -282,6 +282,24 @@ func submitHuntHandler(c *gin.Context) {
 		return
 	}
 
+	// --- SEGURIDAD DE PRODUCCIÓN ---
+	// 1. Solo permitir al ID de Administrador cazar por ahora
+	const adminID = "wkq951i7vvhJbrZOQmUav6B28BZ2"
+	if req.UserID != adminID {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Acceso denegado: Solo el Administrador puede registrar puntos en esta fase"})
+		return
+	}
+
+	// 2. Validación estricta de categorías
+	allowedCategories := map[string]bool{
+		"station_moto": true,
+		"station_car":  true,
+	}
+	if !allowedCategories[req.Category] {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Categoría no permitida. Solo se aceptan paradas de Moto o Carro."})
+		return
+	}
+
 	// 0. PROXIMITY CHECK (Anti-Duplicado) - 20 metros
 	var count int64
 	checkQuery := `

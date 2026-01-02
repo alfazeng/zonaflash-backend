@@ -69,8 +69,8 @@ type Location struct {
 type Transaction struct {
 	ID          string    `gorm:"primaryKey;type:uuid;default:gen_random_uuid()" json:"id"`
 	UserID      string    `gorm:"index" json:"user_id"`
-	Type        string    `json:"type"` // 'earning'
-	Amount      float64   `json:"amount"`
+	Type        string    `json:"type"`   // 'earning'
+	Amount      float64   `json:"points"` // Cambiado de 'amount' a 'points' para el FE
 	Description string    `json:"description"`
 	CreatedAt   time.Time `json:"created_at"`
 }
@@ -128,6 +128,7 @@ func main() {
 	r.POST("/api/wallet/redeem", requestRedeem)
 	// Hunter
 	r.POST("/api/hunter/submit", submitHuntHandler)
+	r.GET("/api/transactions/:user_id", getTransactions)
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -210,8 +211,7 @@ func getNearbyOffers(c *gin.Context) {
 				longitude,
 				ST_Distance(geom, ST_MakePoint(?, ?)::geography) as distance_meters
 			FROM locations
-			WHERE (is_shadow = true OR status = 'approved')
-			AND ST_DWithin(geom, ST_MakePoint(?, ?)::geography, ?)
+			WHERE ST_DWithin(geom, ST_MakePoint(?, ?)::geography, ?)
 		)
 		ORDER BY distance_meters ASC LIMIT 50;`
 
@@ -376,4 +376,17 @@ func submitHuntHandler(c *gin.Context) {
 
 	tx.Commit()
 	c.JSON(200, gin.H{"message": "Hunt submitted successfully", "points": 10})
+}
+
+func getTransactions(c *gin.Context) {
+	userID := c.Param("user_id")
+	var transactions []Transaction
+
+	// Orden descendente por fecha para ver las capturas más recientes arriba
+	if err := db.Order("created_at DESC").Find(&transactions, "user_id = ?", userID).Error; err != nil {
+		c.JSON(500, gin.H{"error": "Error consultando transacciones"})
+		return
+	}
+
+	c.JSON(200, transactions)
 }

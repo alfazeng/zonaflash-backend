@@ -17,7 +17,7 @@ import (
 
 // Ofertas (Para el mapa)
 type OfferResponse struct {
-	ID          uint    `json:"id"`
+	ID          string  `json:"id"`
 	Title       string  `json:"title"`
 	Description string  `json:"description"`
 	Price       float64 `json:"price"`
@@ -30,7 +30,7 @@ type OfferResponse struct {
 
 // Vehículos (Para el usuario)
 type Vehicle struct {
-	ID       uint   `gorm:"primaryKey" json:"id"`
+	ID       string `gorm:"primaryKey;type:uuid;default:gen_random_uuid()" json:"id"`
 	UserID   string `gorm:"index" json:"user_id"`
 	Type     string `json:"type"` // 'car' o 'moto'
 	Brand    string `json:"brand"`
@@ -51,7 +51,7 @@ type Wallet struct {
 
 // Location (Puntos cazados)
 type Location struct {
-	ID               uint        `gorm:"primaryKey" json:"id"`
+	ID               string      `gorm:"primaryKey;type:uuid;default:gen_random_uuid()" json:"id"`
 	UserID           string      `gorm:"index" json:"user_id"`
 	ShopName         string      `json:"shop_name"`
 	Category         string      `json:"category"`
@@ -67,7 +67,7 @@ type Location struct {
 
 // Transaction (Historial de puntos)
 type Transaction struct {
-	ID          uint      `gorm:"primaryKey" json:"id"`
+	ID          string    `gorm:"primaryKey;type:uuid;default:gen_random_uuid()" json:"id"`
 	UserID      string    `gorm:"index" json:"user_id"`
 	Type        string    `json:"type"` // 'earning'
 	Amount      float64   `json:"amount"`

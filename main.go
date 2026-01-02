@@ -182,7 +182,12 @@ func getNearbyOffers(c *gin.Context) {
 	query := `
 		(
 			SELECT 
-				id::text, title, description, price, category::text, status,
+				id::text, 
+				title, 
+				description, 
+				price, 
+				category::text, -- Cast para el Enum de categoría
+				status::text,   -- Cast para el Enum de status (ESTE ES EL VITAL)
 				ST_Y(location::geometry) as latitude, 
 				ST_X(location::geometry) as longitude,
 				ST_Distance(location, ST_MakePoint(?, ?)::geography) as distance_meters
@@ -192,12 +197,17 @@ func getNearbyOffers(c *gin.Context) {
 		UNION ALL
 		(
 			SELECT 
-				id::text, shop_name as title, '' as description, 0 as price, category,
+				id::text, 
+				shop_name as title, 
+				'' as description, 
+				0 as price, 
+				category,        -- Ya es texto
 				CASE 
 					WHEN category IN ('station_moto', 'station_car') THEN 'shadow'
 					ELSE status 
-				END as status,
-				latitude, longitude,
+				END as status,   -- Aquí ya es texto
+				latitude, 
+				longitude,
 				ST_Distance(geom, ST_MakePoint(?, ?)::geography) as distance_meters
 			FROM locations
 			WHERE (is_shadow = true OR status = 'approved')

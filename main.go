@@ -182,7 +182,7 @@ func getNearbyOffers(c *gin.Context) {
 	query := `
 		(
 			SELECT 
-				id::text, title, description, price, category, status,
+				id::text, title, description, price, category::text, status,
 				ST_Y(location::geometry) as latitude, 
 				ST_X(location::geometry) as longitude,
 				ST_Distance(location, ST_MakePoint(?, ?)::geography) as distance_meters

@@ -97,6 +97,9 @@ func main() {
 	// Migración automática (Crea tablas si no existen, útil como respaldo)
 	db.AutoMigrate(&Vehicle{}, &Wallet{}, &Location{}, &Transaction{})
 
+	// Fix: Eliminar constraint de user_id si existe (MVP mode)
+	db.Exec("ALTER TABLE wallets DROP CONSTRAINT IF EXISTS wallets_user_id_fkey;")
+
 	r := gin.Default()
 
 	// CORS (Permitir acceso desde la App)
@@ -175,19 +178,34 @@ func getNearbyOffers(c *gin.Context) {
 	}
 
 	var offers []OfferResponse
-	// Consulta Geoespacial
-	// Seleccionamos 'status' para que el frontend decida el color del pin (Amarillo/Rojo/Gris)
+	// Consulta Geoespacial (UNION ALL entre Ofertas y Puntos Cazados)
 	query := `
-		SELECT 
-            id, title, description, price, category, status,
-		    ST_Y(location::geometry) as latitude, 
-            ST_X(location::geometry) as longitude,
-		    ST_Distance(location, ST_MakePoint(?, ?)::geography) as distance_meters
-		FROM offers
-		WHERE ST_DWithin(location, ST_MakePoint(?, ?)::geography, ?)
+		(
+			SELECT 
+				id::text, title, description, price, category, status,
+				ST_Y(location::geometry) as latitude, 
+				ST_X(location::geometry) as longitude,
+				ST_Distance(location, ST_MakePoint(?, ?)::geography) as distance_meters
+			FROM offers
+			WHERE ST_DWithin(location, ST_MakePoint(?, ?)::geography, ?)
+		)
+		UNION ALL
+		(
+			SELECT 
+				id::text, shop_name as title, '' as description, 0 as price, category,
+				CASE 
+					WHEN category IN ('station_moto', 'station_car') THEN 'shadow'
+					ELSE status 
+				END as status,
+				latitude, longitude,
+				ST_Distance(geom, ST_MakePoint(?, ?)::geography) as distance_meters
+			FROM locations
+			WHERE (is_shadow = true OR status = 'approved')
+			AND ST_DWithin(geom, ST_MakePoint(?, ?)::geography, ?)
+		)
 		ORDER BY distance_meters ASC LIMIT 50;`
 
-	db.Raw(query, lng, lat, lng, lat, radius).Scan(&offers)
+	db.Raw(query, lng, lat, lng, lat, radius, lng, lat, lng, lat, radius).Scan(&offers)
 	c.JSON(200, offers)
 }
 
@@ -313,6 +331,9 @@ func submitHuntHandler(c *gin.Context) {
 	}
 
 	// 3. Upsert Wallet
+	// Raw SQL para asegurar que el constraint no bloquee (MVP)
+	tx.Exec("SET CONSTRAINTS ALL DEFERRED")
+
 	// Usamos raw SQL para upsert atómico y sencillo
 	if err := tx.Exec(`
         INSERT INTO wallets (user_id, balance, lifetime_points, goal, status, level_name) 

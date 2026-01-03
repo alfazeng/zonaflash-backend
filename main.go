@@ -290,13 +290,21 @@ func submitHuntHandler(c *gin.Context) {
 		return
 	}
 
-	// 2. Validación estricta de categorías
+	// 2. Validación estricta de categorías de producción
 	allowedCategories := map[string]bool{
 		"station_moto": true,
 		"station_car":  true,
+		"mechanic":     true,
+		"parts":        true,
+		"tires":        true,
+		"oil":          true,
+		"wash":         true,
+		"tow":          true,
+		"food":         true,
+		"fuel_dollar":  true,
 	}
 	if !allowedCategories[req.Category] {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Categoría no permitida. Solo se aceptan paradas de Moto o Carro."})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Categoría no permitida: " + req.Category})
 		return
 	}
 

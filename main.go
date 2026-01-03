@@ -42,7 +42,8 @@ type Vehicle struct {
 // Wallet (Billetera del usuario)
 type Wallet struct {
 	UserID         string  `gorm:"primaryKey" json:"user_id"`
-	Balance        float64 `json:"balance"`
+	BalanceMoto    float64 `json:"balance_moto"`
+	BalanceCar     float64 `json:"balance_car"`
 	LifetimePoints float64 `json:"lifetime_points"`
 	Goal           float64 `gorm:"default:500" json:"goal"`
 	Status         string  `gorm:"default:'active'" json:"status"` // 'active', 'pending', 'frozen'
@@ -53,6 +54,7 @@ type Wallet struct {
 type Location struct {
 	ID               string      `gorm:"primaryKey;type:uuid;default:gen_random_uuid()" json:"id"`
 	UserID           string      `gorm:"index" json:"user_id"`
+	VehicleType      string      `json:"vehicle_type"` // 'moto' o 'car'
 	ShopName         string      `json:"shop_name"`
 	Category         string      `json:"category"`
 	PhotoURL         string      `json:"photo_url"`
@@ -69,8 +71,9 @@ type Location struct {
 type Transaction struct {
 	ID          string    `gorm:"primaryKey;type:uuid;default:gen_random_uuid()" json:"id"`
 	UserID      string    `gorm:"index" json:"user_id"`
-	Type        string    `json:"type"`   // 'earning'
-	Amount      float64   `json:"points"` // Cambiado de 'amount' a 'points' para el FE
+	VehicleType string    `json:"vehicle_type"` // 'moto' o 'car'
+	Type        string    `json:"type"`         // 'earning'
+	Amount      float64   `json:"points"`       // Cambiado de 'amount' a 'points' para el FE
 	Description string    `json:"description"`
 	CreatedAt   time.Time `json:"created_at"`
 }
@@ -227,7 +230,8 @@ func getWallet(c *gin.Context) {
 	if result := db.First(&wallet, "user_id = ?", userID); result.Error != nil {
 		wallet = Wallet{
 			UserID:         userID,
-			Balance:        0,
+			BalanceMoto:    0,
+			BalanceCar:     0,
 			LifetimePoints: 0,
 			Goal:           500,
 			Status:         "active",
@@ -240,10 +244,11 @@ func getWallet(c *gin.Context) {
 
 func requestRedeem(c *gin.Context) {
 	var req struct {
-		UserID string `json:"user_id"`
+		UserID      string `json:"user_id"`
+		VehicleType string `json:"vehicle_type"` // 'moto' o 'car'
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(400, gin.H{"error": "Falta user_id"})
+		c.JSON(400, gin.H{"error": "Falta datos (user_id/vehicle_type)"})
 		return
 	}
 
@@ -253,8 +258,13 @@ func requestRedeem(c *gin.Context) {
 		return
 	}
 
-	if wallet.Balance < wallet.Goal {
-		c.JSON(400, gin.H{"error": "Saldo insuficiente"})
+	currentBalance := wallet.BalanceMoto
+	if req.VehicleType == "car" {
+		currentBalance = wallet.BalanceCar
+	}
+
+	if currentBalance < wallet.Goal {
+		c.JSON(400, gin.H{"error": "Saldo insuficiente en el modo seleccionado"})
 		return
 	}
 
@@ -268,6 +278,7 @@ func requestRedeem(c *gin.Context) {
 func submitHuntHandler(c *gin.Context) {
 	var req struct {
 		UserID           string  `json:"user_id"`
+		VehicleType      string  `json:"vehicle_type"` // 'moto' o 'car'
 		ShopName         string  `json:"shop_name"`
 		PhotoURL         string  `json:"photo_url"`
 		Category         string  `json:"category"`
@@ -327,6 +338,7 @@ func submitHuntHandler(c *gin.Context) {
 	// 1. Insert Location
 	loc := Location{
 		UserID:           req.UserID,
+		VehicleType:      req.VehicleType,
 		ShopName:         req.ShopName,
 		Category:         req.Category,
 		PhotoURL:         req.PhotoURL,
@@ -355,6 +367,7 @@ func submitHuntHandler(c *gin.Context) {
 	// 2. Insert Transaction
 	trans := Transaction{
 		UserID:      req.UserID,
+		VehicleType: req.VehicleType,
 		Type:        "earning",
 		Amount:      10,
 		Description: "Caza: " + req.ShopName,
@@ -371,12 +384,28 @@ func submitHuntHandler(c *gin.Context) {
 	tx.Exec("SET CONSTRAINTS ALL DEFERRED")
 
 	// Usamos raw SQL para upsert atómico y sencillo
-	if err := tx.Exec(`
-        INSERT INTO wallets (user_id, balance, lifetime_points, goal, status, level_name) 
-        VALUES (?, 10, 10, 500, 'active', 'Novato') 
+	// Determinamos qué balance actualizar según el vehicle_type
+	balanceCol := "balance_moto"
+	if req.VehicleType == "car" {
+		balanceCol = "balance_car"
+	}
+
+	upsertWallet := `
+        INSERT INTO wallets (user_id, balance_moto, balance_car, lifetime_points, goal, status, level_name) 
+        VALUES (?, ?, ?, 10, 500, 'active', 'Novato') 
         ON CONFLICT (user_id) 
-        DO UPDATE SET balance = wallets.balance + 10, lifetime_points = wallets.lifetime_points + 10
-    `, req.UserID).Error; err != nil {
+        DO UPDATE SET ` + balanceCol + ` = wallets.` + balanceCol + ` + 10, lifetime_points = wallets.lifetime_points + 10
+    `
+
+	balanceMotoInit := 0.0
+	balanceCarInit := 0.0
+	if req.VehicleType == "car" {
+		balanceCarInit = 10.0
+	} else {
+		balanceMotoInit = 10.0
+	}
+
+	if err := tx.Exec(upsertWallet, req.UserID, balanceMotoInit, balanceCarInit).Error; err != nil {
 		tx.Rollback()
 		c.JSON(500, gin.H{"error": "Error updating wallet"})
 		return
@@ -388,10 +417,16 @@ func submitHuntHandler(c *gin.Context) {
 
 func getTransactions(c *gin.Context) {
 	userID := c.Param("user_id")
+	vehicleType := c.Query("vehicle_type") // Opcional: moto o car
+
 	var transactions []Transaction
 
-	// Orden descendente por fecha para ver las capturas más recientes arriba
-	if err := db.Order("created_at DESC").Find(&transactions, "user_id = ?", userID).Error; err != nil {
+	query := db.Order("created_at DESC").Where("user_id = ?", userID)
+	if vehicleType != "" {
+		query = query.Where("vehicle_type = ?", vehicleType)
+	}
+
+	if err := query.Find(&transactions).Error; err != nil {
 		c.JSON(500, gin.H{"error": "Error consultando transacciones"})
 		return
 	}

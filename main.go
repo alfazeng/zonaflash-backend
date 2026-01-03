@@ -294,11 +294,10 @@ func submitHuntHandler(c *gin.Context) {
 	}
 
 	// --- SEGURIDAD DE PRODUCCIÓN ---
-	// 1. Solo permitir al ID de Administrador cazar por ahora
-	const adminID = "wkq951i7vvhJbrZOQmUav6B28BZ2"
-	const hunterID = "REPLACE_WITH_PORTESOTO_UID" // <--- NUEVO CAZADOR AUTORIZADO
-	if req.UserID != adminID && req.UserID != hunterID {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Acceso denegado: Solo el Administrador o Cazadores autorizados pueden registrar puntos"})
+	// 1. Autorización: Administrador y Cazador Oficial
+	const authorizedUID = "wkq951i7vvhJbrZOQmUav6B28BZ2"
+	if req.UserID != authorizedUID {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Acceso denegado: ID de usuario no autorizado para capturas oficiales"})
 		return
 	}
 
@@ -369,9 +368,8 @@ func submitHuntHandler(c *gin.Context) {
 	trans := Transaction{
 		UserID:      req.UserID,
 		VehicleType: req.VehicleType,
-		Type:        "earning",
 		Amount:      10,
-		Description: "Caza: " + req.ShopName,
+		Description: "Captura de negocio: " + req.ShopName,
 		CreatedAt:   time.Now(),
 	}
 	if err := tx.Create(&trans).Error; err != nil {
@@ -412,8 +410,21 @@ func submitHuntHandler(c *gin.Context) {
 		return
 	}
 
-	tx.Commit()
-	c.JSON(200, gin.H{"message": "Hunt submitted successfully", "points": 10})
+	if err := tx.Commit().Error; err != nil {
+		log.Printf("❌ Error al hacer COMMIT: %v", err)
+	} else {
+		log.Printf("✅ Transacción COMMIT exitosa para User: %s", req.UserID)
+	}
+
+	// 4. Return updated wallet for instant FE sync
+	var updatedWallet Wallet
+	db.First(&updatedWallet, "user_id = ?", req.UserID)
+
+	c.JSON(200, gin.H{
+		"message": "Hunt submitted successfully",
+		"points":  10,
+		"wallet":  updatedWallet,
+	})
 }
 
 func getTransactions(c *gin.Context) {

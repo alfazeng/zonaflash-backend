@@ -296,8 +296,9 @@ func submitHuntHandler(c *gin.Context) {
 	// --- SEGURIDAD DE PRODUCCIÓN ---
 	// 1. Solo permitir al ID de Administrador cazar por ahora
 	const adminID = "wkq951i7vvhJbrZOQmUav6B28BZ2"
-	if req.UserID != adminID {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Acceso denegado: Solo el Administrador puede registrar puntos en esta fase"})
+	const hunterID = "REPLACE_WITH_PORTESOTO_UID" // <--- NUEVO CAZADOR AUTORIZADO
+	if req.UserID != adminID && req.UserID != hunterID {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Acceso denegado: Solo el Administrador o Cazadores autorizados pueden registrar puntos"})
 		return
 	}
 

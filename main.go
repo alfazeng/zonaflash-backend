@@ -351,13 +351,17 @@ func submitHuntHandler(c *gin.Context) {
 		ctx := context.Background()
 		var client *storage.Client
 
-		// Prioridad: GCP_SERVICE_ACCOUNT_JSON (string) > GOOGLE_APPLICATION_CREDENTIALS (path)
+		// Corrección: Evitar "multiple credential options provided"
 		saJSON := os.Getenv("GCP_SERVICE_ACCOUNT_JSON")
+
+		var opts []option.ClientOption
 		if saJSON != "" {
-			client, err = storage.NewClient(ctx, option.WithCredentialsJSON([]byte(saJSON)))
-		} else {
-			client, err = storage.NewClient(ctx)
+			opts = append(opts, option.WithCredentialsJSON([]byte(saJSON)))
 		}
+		// Si saJSON está vacío, NewClient buscará automáticamente en GOOGLE_APPLICATION_CREDENTIALS
+		// sin conflicto de opciones múltiples.
+
+		client, err = storage.NewClient(ctx, opts...)
 
 		if err != nil {
 			log.Printf("❌ Error creando cliente GCS: %v", err)

@@ -11,6 +11,13 @@ import (
 	"github.com/joho/godotenv"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+
+	"context"
+	"fmt"
+	"io"
+
+	"cloud.google.com/go/storage"
+	"google.golang.org/api/option"
 )
 
 // --- MODELOS ---
@@ -276,30 +283,33 @@ func requestRedeem(c *gin.Context) {
 }
 
 func submitHuntHandler(c *gin.Context) {
-	var req struct {
-		UserID           string  `json:"user_id"`
-		VehicleType      string  `json:"vehicle_type"` // 'moto' o 'car'
-		ShopName         string  `json:"shop_name"`
-		PhotoURL         string  `json:"photo_url"`
-		Category         string  `json:"category"`
-		Latitude         float64 `json:"latitude"`
-		Longitude        float64 `json:"longitude"`
-		IsShadow         bool    `json:"is_shadow"`
-		ActivationStatus string  `json:"activation_status"`
-		AssetType        string  `json:"asset_type"`
-	}
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(400, gin.H{"error": err.Error()})
-		return
-	}
+	// Ya no usamos JSON binding para este endpoint
 
 	// --- SEGURIDAD DE PRODUCCIÓN ---
-	// 1. Autorización: Administrador y Cazador Oficial
-	const authorizedUID = "wkq951i7vvhJbrZOQmUav6B28BZ2"
-	if req.UserID != authorizedUID {
+	// 1. Autorización: Administradores y Cazadores Oficiales
+	authorizedUIDs := map[string]bool{
+		"wkq951i7vvhJbrZOQmUav6B28BZ2": true, // Admin 1
+		"DtfBh0Tr41fyjUwtcbl9WCBpgOJ2": true, // Usuario actual
+	}
+
+	// Como es multipart/form-data, leemos los campos uno por uno o usamos una estructura
+	userID := c.PostForm("user_id")
+	if !authorizedUIDs[userID] {
 		c.JSON(http.StatusForbidden, gin.H{"error": "Acceso denegado: ID de usuario no autorizado para capturas oficiales"})
 		return
 	}
+
+	shopName := c.PostForm("shop_name")
+	category := c.PostForm("category")
+	vehicleType := c.PostForm("vehicle_type")
+	latStr := c.PostForm("latitude")
+	lngStr := c.PostForm("longitude")
+	isShadow := c.PostForm("is_shadow") == "true"
+	activationStatus := c.PostForm("activation_status")
+	assetType := c.PostForm("asset_type")
+
+	lat, _ := strconv.ParseFloat(latStr, 64)
+	lng, _ := strconv.ParseFloat(lngStr, 64)
 
 	// 2. Validación estricta de categorías de producción
 	allowedCategories := map[string]bool{
@@ -314,8 +324,8 @@ func submitHuntHandler(c *gin.Context) {
 		"food":         true,
 		"fuel_dollar":  true,
 	}
-	if !allowedCategories[req.Category] {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Categoría no permitida: " + req.Category})
+	if !allowedCategories[category] {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Categoría no permitida: " + category})
 		return
 	}
 
@@ -326,28 +336,69 @@ func submitHuntHandler(c *gin.Context) {
 		FROM locations 
 		WHERE category = ? 
 		AND ST_DWithin(geom, ST_SetSRID(ST_MakePoint(?, ?), 4326)::geography, 20)`
-	db.Raw(checkQuery, req.Category, req.Longitude, req.Latitude).Scan(&count)
+	db.Raw(checkQuery, category, lng, lat).Scan(&count)
 
 	if count > 0 {
 		c.JSON(http.StatusConflict, gin.H{"error": "Este punto ya ha sido capturado recientemente"})
 		return
 	}
 
+	// 1. Manejo de Imagen (GCS Proxy)
+	photoUrl := ""
+	file, err := c.FormFile("photo")
+	if err == nil {
+		// El usuario envió una foto, procedemos a subirla a GCS
+		ctx := context.Background()
+		var client *storage.Client
+
+		// Prioridad: GCP_SERVICE_ACCOUNT_JSON (string) > GOOGLE_APPLICATION_CREDENTIALS (path)
+		saJSON := os.Getenv("GCP_SERVICE_ACCOUNT_JSON")
+		if saJSON != "" {
+			client, err = storage.NewClient(ctx, option.WithCredentialsJSON([]byte(saJSON)))
+		} else {
+			client, err = storage.NewClient(ctx)
+		}
+
+		if err != nil {
+			log.Printf("❌ Error creando cliente GCS: %v", err)
+		} else {
+			defer client.Close()
+
+			bucketName := "chatcerex-v4-post-images"
+			objectName := fmt.Sprintf("zona_flash/captures/%s/%d.jpg", userID, time.Now().Unix())
+
+			f, _ := file.Open()
+			defer f.Close()
+
+			wc := client.Bucket(bucketName).Object(objectName).NewWriter(ctx)
+			wc.ContentType = "image/jpeg"
+			if _, err = io.Copy(wc, f); err != nil {
+				log.Printf("❌ Error copiando a GCS: %v", err)
+			}
+			if err := wc.Close(); err != nil {
+				log.Printf("❌ Error cerrando GCS writer: %v", err)
+			} else {
+				photoUrl = fmt.Sprintf("https://storage.googleapis.com/%s/%s", bucketName, objectName)
+				log.Printf("✅ Foto subida exitosamente: %s", photoUrl)
+			}
+		}
+	}
+
 	tx := db.Begin()
 
-	// 1. Insert Location
+	// 2. Insert Location
 	loc := Location{
-		UserID:           req.UserID,
-		VehicleType:      req.VehicleType,
-		ShopName:         req.ShopName,
-		Category:         req.Category,
-		PhotoURL:         req.PhotoURL,
-		Latitude:         req.Latitude,
-		Longitude:        req.Longitude,
+		UserID:           userID,
+		VehicleType:      vehicleType,
+		ShopName:         shopName,
+		Category:         category,
+		PhotoURL:         photoUrl,
+		Latitude:         lat,
+		Longitude:        lng,
 		Status:           "pending",
-		IsShadow:         req.IsShadow,
-		ActivationStatus: req.ActivationStatus,
-		AssetType:        req.AssetType,
+		IsShadow:         isShadow,
+		ActivationStatus: activationStatus,
+		AssetType:        assetType,
 	}
 
 	// 1.1 Poblar Geom manualmente para PostGIS
@@ -358,18 +409,18 @@ func submitHuntHandler(c *gin.Context) {
 	}
 
 	updateGeom := "UPDATE locations SET geom = ST_SetSRID(ST_MakePoint(?, ?), 4326)::geography WHERE id = ?"
-	if err := tx.Exec(updateGeom, req.Longitude, req.Latitude, loc.ID).Error; err != nil {
+	if err := tx.Exec(updateGeom, lng, lat, loc.ID).Error; err != nil {
 		tx.Rollback()
 		c.JSON(500, gin.H{"error": "Error updating geography"})
 		return
 	}
 
-	// 2. Insert Transaction
+	// 3. Insert Transaction
 	trans := Transaction{
-		UserID:      req.UserID,
-		VehicleType: req.VehicleType,
+		UserID:      userID,
+		VehicleType: vehicleType,
 		Amount:      10,
-		Description: "Captura de negocio: " + req.ShopName,
+		Description: "Captura de negocio: " + shopName,
 		CreatedAt:   time.Now(),
 	}
 	if err := tx.Create(&trans).Error; err != nil {
@@ -385,7 +436,7 @@ func submitHuntHandler(c *gin.Context) {
 	// Usamos raw SQL para upsert atómico y sencillo
 	// Determinamos qué balance actualizar según el vehicle_type
 	balanceCol := "balance_moto"
-	if req.VehicleType == "car" {
+	if vehicleType == "car" {
 		balanceCol = "balance_car"
 	}
 
@@ -398,13 +449,13 @@ func submitHuntHandler(c *gin.Context) {
 
 	balanceMotoInit := 0.0
 	balanceCarInit := 0.0
-	if req.VehicleType == "car" {
+	if vehicleType == "car" {
 		balanceCarInit = 10.0
 	} else {
 		balanceMotoInit = 10.0
 	}
 
-	if err := tx.Exec(upsertWallet, req.UserID, balanceMotoInit, balanceCarInit).Error; err != nil {
+	if err := tx.Exec(upsertWallet, userID, balanceMotoInit, balanceCarInit).Error; err != nil {
 		tx.Rollback()
 		c.JSON(500, gin.H{"error": "Error updating wallet"})
 		return
@@ -413,12 +464,12 @@ func submitHuntHandler(c *gin.Context) {
 	if err := tx.Commit().Error; err != nil {
 		log.Printf("❌ Error al hacer COMMIT: %v", err)
 	} else {
-		log.Printf("✅ Transacción COMMIT exitosa para User: %s", req.UserID)
+		log.Printf("✅ Transacción COMMIT exitosa para User: %s", userID)
 	}
 
-	// 4. Return updated wallet for instant FE sync
+	// 5. Return updated wallet for instant FE sync
 	var updatedWallet Wallet
-	db.First(&updatedWallet, "user_id = ?", req.UserID)
+	db.First(&updatedWallet, "user_id = ?", userID)
 
 	c.JSON(200, gin.H{
 		"message": "Hunt submitted successfully",

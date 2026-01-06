@@ -343,53 +343,60 @@ func submitHuntHandler(c *gin.Context) {
 		c.JSON(http.StatusConflict, gin.H{"error": "Este punto ya ha sido capturado recientemente"})
 		return
 	}
-
-	// 1. Manejo de Imagen (GCS Proxy)
+	// 1. de Imagen (GCS Proxy)
 	photoUrl := ""
 	file, err := c.FormFile("photo")
 	if err == nil {
-		// El usuario envió una foto, procedemos a subirla a GCS
 		ctx := context.Background()
 		var client *storage.Client
+		var gcsErr error
 
 		// Corrección: Evitar "multiple credential options provided"
 		saJSON := os.Getenv("GCP_SERVICE_ACCOUNT_JSON")
-		var gcsErr error // Dedicada para GCS
 		if saJSON != "" {
 			log.Println("ℹ️ Iniciando GCS con JSON de Render (GCP_SERVICE_ACCOUNT_JSON)")
 
-			// SOLUCIÓN CREDENCIALES: Forzar el uso del JSON ignorando el entorno
+			// 1. Limpiamos cualquier variable de entorno heredada que cause el conflicto
+			os.Unsetenv("GOOGLE_APPLICATION_CREDENTIALS")
+
+			// 2. Cargamos las credenciales explícitamente
 			creds, errJSON := google.CredentialsFromJSON(ctx, []byte(saJSON), storage.ScopeFullControl)
 			if errJSON != nil {
 				log.Printf("❌ Error procesando JSON de credenciales: %v", errJSON)
 				gcsErr = errJSON
 			} else {
+				// 3. Inicializamos el cliente usando ÚNICAMENTE el objeto creds
 				client, gcsErr = storage.NewClient(ctx, option.WithCredentials(creds))
 			}
 		}
 
 		// SOLUCIÓN PANIC: Validar que el cliente exista antes de intentar el Close()
+		// Validación de seguridad para evitar Panic y reportar error de conexión
 		if gcsErr != nil || client == nil {
 			log.Printf("❌ Error creando cliente GCS: %v", gcsErr)
 		} else {
-			defer client.Close() // Ahora es seguro porque client no es nil
+			defer client.Close()
 
 			bucketName := "chatcerex-v4-post-images"
 			objectName := fmt.Sprintf("zona_flash/captures/%s/%d.jpg", userID, time.Now().Unix())
 
-			f, _ := file.Open()
-			defer f.Close()
-
-			wc := client.Bucket(bucketName).Object(objectName).NewWriter(ctx)
-			wc.ContentType = "image/jpeg"
-			if _, err = io.Copy(wc, f); err != nil {
-				log.Printf("❌ Error copiando a GCS: %v", err)
-			}
-			if err := wc.Close(); err != nil {
-				log.Printf("❌ Error cerrando GCS writer: %v", err)
+			f, openErr := file.Open()
+			if openErr != nil {
+				log.Printf("❌ Error abriendo archivo de imagen: %v", openErr)
 			} else {
-				photoUrl = fmt.Sprintf("https://storage.googleapis.com/%s/%s", bucketName, objectName)
-				log.Printf("✅ Foto subida exitosamente: %s", photoUrl)
+				defer f.Close()
+
+				wc := client.Bucket(bucketName).Object(objectName).NewWriter(ctx)
+				wc.ContentType = "image/jpeg"
+				if _, err = io.Copy(wc, f); err != nil {
+					log.Printf("❌ Error copiando a GCS: %v", err)
+				}
+				if err := wc.Close(); err != nil {
+					log.Printf("❌ Error cerrando GCS writer: %v", err)
+				} else {
+					photoUrl = fmt.Sprintf("https://storage.googleapis.com/%s/%s", bucketName, objectName)
+					log.Printf("✅ Foto subida exitosamente: %s", photoUrl)
+				}
 			}
 		}
 	}

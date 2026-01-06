@@ -354,27 +354,25 @@ func submitHuntHandler(c *gin.Context) {
 
 		// Corrección: Evitar "multiple credential options provided"
 		saJSON := os.Getenv("GCP_SERVICE_ACCOUNT_JSON")
-
+		var gcsErr error // Dedicada para GCS
 		if saJSON != "" {
 			log.Println("ℹ️ Iniciando GCS con JSON de Render (GCP_SERVICE_ACCOUNT_JSON)")
 
-			// Creamos el objeto de credenciales explícitamente para evitar conflictos con el entorno
-			creds, err := google.CredentialsFromJSON(ctx, []byte(saJSON), storage.ScopeFullControl)
-			if err != nil {
-				log.Printf("❌ Error procesando JSON de credenciales: %v", err)
+			// SOLUCIÓN CREDENCIALES: Forzar el uso del JSON ignorando el entorno
+			creds, errJSON := google.CredentialsFromJSON(ctx, []byte(saJSON), storage.ScopeFullControl)
+			if errJSON != nil {
+				log.Printf("❌ Error procesando JSON de credenciales: %v", errJSON)
+				gcsErr = errJSON
 			} else {
-				// Al pasar option.WithCredentials(creds), el SDK deja de buscar otras opciones
-				client, err = storage.NewClient(ctx, option.WithCredentials(creds))
+				client, gcsErr = storage.NewClient(ctx, option.WithCredentials(creds))
 			}
-		} else {
-			log.Println("⚠️ GCP_SERVICE_ACCOUNT_JSON no detectado, intentando Default Credentials")
-			client, err = storage.NewClient(ctx)
 		}
 
-		if err != nil {
-			log.Printf("❌ Error creando cliente GCS: %v", err)
+		// SOLUCIÓN PANIC: Validar que el cliente exista antes de intentar el Close()
+		if gcsErr != nil || client == nil {
+			log.Printf("❌ Error creando cliente GCS: %v", gcsErr)
 		} else {
-			defer client.Close()
+			defer client.Close() // Ahora es seguro porque client no es nil
 
 			bucketName := "chatcerex-v4-post-images"
 			objectName := fmt.Sprintf("zona_flash/captures/%s/%d.jpg", userID, time.Now().Unix())

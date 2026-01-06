@@ -354,14 +354,13 @@ func submitHuntHandler(c *gin.Context) {
 		// Corrección: Evitar "multiple credential options provided"
 		saJSON := os.Getenv("GCP_SERVICE_ACCOUNT_JSON")
 
-		var opts []option.ClientOption
 		if saJSON != "" {
-			opts = append(opts, option.WithCredentialsJSON([]byte(saJSON)))
+			log.Println("ℹ️ Iniciando GCS con JSON de Render (GCP_SERVICE_ACCOUNT_JSON)")
+			client, err = storage.NewClient(ctx, option.WithCredentialsJSON([]byte(saJSON)))
+		} else {
+			log.Println("⚠️ GCP_SERVICE_ACCOUNT_JSON no detectado, intentando Default Credentials")
+			client, err = storage.NewClient(ctx)
 		}
-		// Si saJSON está vacío, NewClient buscará automáticamente en GOOGLE_APPLICATION_CREDENTIALS
-		// sin conflicto de opciones múltiples.
-
-		client, err = storage.NewClient(ctx, opts...)
 
 		if err != nil {
 			log.Printf("❌ Error creando cliente GCS: %v", err)

@@ -17,6 +17,7 @@ import (
 	"io"
 
 	"cloud.google.com/go/storage"
+	"golang.org/x/oauth2/google"
 	"google.golang.org/api/option"
 )
 
@@ -356,7 +357,15 @@ func submitHuntHandler(c *gin.Context) {
 
 		if saJSON != "" {
 			log.Println("ℹ️ Iniciando GCS con JSON de Render (GCP_SERVICE_ACCOUNT_JSON)")
-			client, err = storage.NewClient(ctx, option.WithCredentialsJSON([]byte(saJSON)))
+
+			// Creamos el objeto de credenciales explícitamente para evitar conflictos con el entorno
+			creds, err := google.CredentialsFromJSON(ctx, []byte(saJSON), storage.ScopeFullControl)
+			if err != nil {
+				log.Printf("❌ Error procesando JSON de credenciales: %v", err)
+			} else {
+				// Al pasar option.WithCredentials(creds), el SDK deja de buscar otras opciones
+				client, err = storage.NewClient(ctx, option.WithCredentials(creds))
+			}
 		} else {
 			log.Println("⚠️ GCP_SERVICE_ACCOUNT_JSON no detectado, intentando Default Credentials")
 			client, err = storage.NewClient(ctx)

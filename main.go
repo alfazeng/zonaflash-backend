@@ -19,6 +19,7 @@ import (
 
 	"golang.org/x/oauth2/google"
 	"google.golang.org/api/option"
+	"google.golang.org/api/transport"
 )
 
 // --- MODELOS ---
@@ -343,35 +344,39 @@ func submitHuntHandler(c *gin.Context) {
 		c.JSON(http.StatusConflict, gin.H{"error": "Este punto ya ha sido capturado recientemente"})
 		return
 	}
-	// 1. Manejo de Imagen (GCS Proxy)
+	// --- INICIALIZACIÓN DE GCS NIVEL SENIOR (Transporte Manual) ---
 	photoUrl := ""
 	file, err := c.FormFile("photo")
 	if err == nil {
 		ctx := context.Background()
 		var client *storage.Client
 
-		// 1. Leemos el archivo físico manualmente
-		jsonKey, errFile := os.ReadFile("firebase-key.json")
+		// 1. Leemos el archivo físico del Secret File
+		data, errFile := os.ReadFile("firebase-key.json")
 		if errFile != nil {
-			log.Printf("❌ Error crítico: No se pudo leer firebase-key.json: %v", errFile)
+			log.Printf("❌ Error leyendo firebase-key.json: %v", errFile)
 		} else {
-			// 2. Procesamos las credenciales de forma aislada (Sin contexto de sistema)
-			creds, errCreds := google.CredentialsFromJSON(ctx, jsonKey, storage.ScopeFullControl)
+			// 2. Creamos la identidad aislada
+			creds, errCreds := google.CredentialsFromJSON(ctx, data, storage.ScopeFullControl)
 			if errCreds != nil {
-				log.Printf("❌ Error procesando JSON del Secret File: %v", errCreds)
+				log.Printf("❌ Error procesando credenciales: %v", errCreds)
 			} else {
-				// 3. Limpiamos el entorno justo antes de crear el cliente
-				os.Unsetenv("GOOGLE_APPLICATION_CREDENTIALS")
-
-				// 4. Inicializamos con el objeto creds YA PROCESADO
-				// Al usar option.WithCredentials(creds), el SDK deja de buscar archivos o variables.
-				client, err = storage.NewClient(ctx, option.WithCredentials(creds))
+				// 3. CREAMOS UN CLIENTE HTTP YA AUTENTICADO
+				// Esto evita que el SDK de Storage intente autenticarse por su cuenta
+				hc, _, errTransport := transport.NewHTTPClient(ctx, option.WithCredentials(creds))
+				if errTransport != nil {
+					log.Printf("❌ Error creando transporte HTTP: %v", errTransport)
+				} else {
+					// 4. INICIALIZAMOS EL CLIENTE USANDO EL TRANSPORTE Y ANULANDO AUTH AUTOMÁTICA
+					// El option.WithoutAuthentication() le dice al SDK: 'No busques llaves, usa el túnel hc'
+					client, err = storage.NewClient(ctx, option.WithHTTPClient(hc), option.WithoutAuthentication())
+				}
 			}
 		}
 
-		// Validación de seguridad para el resto del flujo
+		// Validación de seguridad
 		if err != nil || client == nil {
-			log.Printf("❌ Error creando cliente GCS: %v", err)
+			log.Printf("❌ Error final creando cliente GCS: %v", err)
 		} else {
 			defer client.Close()
 
@@ -394,7 +399,7 @@ func submitHuntHandler(c *gin.Context) {
 					log.Printf("❌ Error cerrando GCS writer: %v", err)
 				} else {
 					photoUrl = fmt.Sprintf("https://storage.googleapis.com/%s/%s", bucketName, objectName)
-					log.Printf("✅ Foto subida exitosamente: %s", photoUrl)
+					log.Printf("✅ FOTO SUBIDA EXITOSAMENTE: %s", photoUrl)
 				}
 			}
 		}

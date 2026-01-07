@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io"
 
+	"golang.org/x/oauth2/google"
 	"google.golang.org/api/option"
 )
 
@@ -347,13 +348,30 @@ func submitHuntHandler(c *gin.Context) {
 	file, err := c.FormFile("photo")
 	if err == nil {
 		ctx := context.Background()
+		var client *storage.Client
 
-		// Al usar WithCredentialsFile apuntando al archivo físico,
-		// el SDK de Google anula automáticamente cualquier otra búsqueda de credenciales.
-		client, err := storage.NewClient(ctx, option.WithCredentialsFile("firebase-key.json"))
+		// 1. Leemos el archivo físico manualmente
+		jsonKey, errFile := os.ReadFile("firebase-key.json")
+		if errFile != nil {
+			log.Printf("❌ Error crítico: No se pudo leer firebase-key.json: %v", errFile)
+		} else {
+			// 2. Procesamos las credenciales de forma aislada (Sin contexto de sistema)
+			creds, errCreds := google.CredentialsFromJSON(ctx, jsonKey, storage.ScopeFullControl)
+			if errCreds != nil {
+				log.Printf("❌ Error procesando JSON del Secret File: %v", errCreds)
+			} else {
+				// 3. Limpiamos el entorno justo antes de crear el cliente
+				os.Unsetenv("GOOGLE_APPLICATION_CREDENTIALS")
 
-		if err != nil {
-			log.Printf("❌ Error creando cliente GCS (Secret File): %v", err)
+				// 4. Inicializamos con el objeto creds YA PROCESADO
+				// Al usar option.WithCredentials(creds), el SDK deja de buscar archivos o variables.
+				client, err = storage.NewClient(ctx, option.WithCredentials(creds))
+			}
+		}
+
+		// Validación de seguridad para el resto del flujo
+		if err != nil || client == nil {
+			log.Printf("❌ Error creando cliente GCS: %v", err)
 		} else {
 			defer client.Close()
 

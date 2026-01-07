@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"time"
 
+	"cloud.google.com/go/storage"
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
 	"gorm.io/driver/postgres"
@@ -16,8 +17,6 @@ import (
 	"fmt"
 	"io"
 
-	"cloud.google.com/go/storage"
-	"golang.org/x/oauth2/google"
 	"google.golang.org/api/option"
 )
 
@@ -343,37 +342,18 @@ func submitHuntHandler(c *gin.Context) {
 		c.JSON(http.StatusConflict, gin.H{"error": "Este punto ya ha sido capturado recientemente"})
 		return
 	}
-	// 1. de Imagen (GCS Proxy)
+	// 1. Manejo de Imagen (GCS Proxy)
 	photoUrl := ""
 	file, err := c.FormFile("photo")
 	if err == nil {
 		ctx := context.Background()
-		var client *storage.Client
-		var gcsErr error
 
-		// Corrección: Evitar "multiple credential options provided"
-		saJSON := os.Getenv("GCP_SERVICE_ACCOUNT_JSON")
-		if saJSON != "" {
-			log.Println("ℹ️ Iniciando GCS con JSON de Render (GCP_SERVICE_ACCOUNT_JSON)")
+		// Al usar WithCredentialsFile apuntando al archivo físico,
+		// el SDK de Google anula automáticamente cualquier otra búsqueda de credenciales.
+		client, err := storage.NewClient(ctx, option.WithCredentialsFile("firebase-key.json"))
 
-			// 1. Limpiamos cualquier variable de entorno heredada que cause el conflicto
-			os.Unsetenv("GOOGLE_APPLICATION_CREDENTIALS")
-
-			// 2. Cargamos las credenciales explícitamente
-			creds, errJSON := google.CredentialsFromJSON(ctx, []byte(saJSON), storage.ScopeFullControl)
-			if errJSON != nil {
-				log.Printf("❌ Error procesando JSON de credenciales: %v", errJSON)
-				gcsErr = errJSON
-			} else {
-				// 3. Inicializamos el cliente usando ÚNICAMENTE el objeto creds
-				client, gcsErr = storage.NewClient(ctx, option.WithCredentials(creds))
-			}
-		}
-
-		// SOLUCIÓN PANIC: Validar que el cliente exista antes de intentar el Close()
-		// Validación de seguridad para evitar Panic y reportar error de conexión
-		if gcsErr != nil || client == nil {
-			log.Printf("❌ Error creando cliente GCS: %v", gcsErr)
+		if err != nil {
+			log.Printf("❌ Error creando cliente GCS (Secret File): %v", err)
 		} else {
 			defer client.Close()
 
@@ -382,12 +362,13 @@ func submitHuntHandler(c *gin.Context) {
 
 			f, openErr := file.Open()
 			if openErr != nil {
-				log.Printf("❌ Error abriendo archivo de imagen: %v", openErr)
+				log.Printf("❌ Error abriendo archivo: %v", openErr)
 			} else {
 				defer f.Close()
 
 				wc := client.Bucket(bucketName).Object(objectName).NewWriter(ctx)
 				wc.ContentType = "image/jpeg"
+
 				if _, err = io.Copy(wc, f); err != nil {
 					log.Printf("❌ Error copiando a GCS: %v", err)
 				}

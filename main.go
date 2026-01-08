@@ -46,6 +46,7 @@ type Vehicle struct {
 	Model    string `json:"model"`
 	Year     int    `json:"year"`
 	IsActive bool   `gorm:"default:true" json:"is_active"`
+	Status   string `gorm:"default:'APPROVED'" json:"status"` // 'PENDING_ADMIN_APPROVAL', 'APPROVED', 'REJECTED'
 }
 
 // Wallet (Billetera del usuario)
@@ -142,6 +143,10 @@ func main() {
 	r.POST("/api/hunter/submit", submitHuntHandler)
 	r.GET("/api/transactions/:user_id", getTransactions)
 
+	// Admin
+	r.GET("/api/admin/pending-vehicles", getPendingVehicles)
+	r.POST("/api/admin/approve-vehicle", approveVehicle)
+
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
@@ -157,6 +162,13 @@ func createVehicle(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	// Inicializamos status según tipo
+	if v.Type == "moto" || v.Type == "car" {
+		v.Status = "PENDING_ADMIN_APPROVAL"
+	} else {
+		v.Status = "APPROVED"
+	}
+
 	// Guardar en DB
 	result := db.Create(&v)
 	if result.Error != nil {
@@ -516,4 +528,43 @@ func getTransactions(c *gin.Context) {
 	}
 
 	c.JSON(200, transactions)
+}
+func getPendingVehicles(c *gin.Context) {
+	var vehicles []Vehicle
+	db.Where("status = ?", "PENDING_ADMIN_APPROVAL").Find(&vehicles)
+	c.JSON(200, vehicles)
+}
+
+func approveVehicle(c *gin.Context) {
+	var req struct {
+		VehicleID string `json:"vehicle_id"`
+		Action    string `json:"action"` // 'approve' o 'reject'
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(400, gin.H{"error": "Faltan datos"})
+		return
+	}
+
+	newStatus := "APPROVED"
+	if req.Action == "reject" {
+		newStatus = "REJECTED"
+	}
+
+	var vehicle Vehicle
+	if err := db.First(&vehicle, "id = ?", req.VehicleID).Error; err != nil {
+		c.JSON(404, gin.H{"error": "Vehículo no encontrado"})
+		return
+	}
+
+	vehicle.Status = newStatus
+	db.Save(&vehicle)
+
+	// PUSH NOTIFICATION SIMULATION
+	if newStatus == "APPROVED" {
+		log.Printf("🔔 [PUSH NOTIFICATION] Para Usuario %s: ¡Tu cuenta ha sido activada!", vehicle.UserID)
+	} else {
+		log.Printf("🔔 [PUSH NOTIFICATION] Para Usuario %s: Tu registro ha sido rechazado.", vehicle.UserID)
+	}
+
+	c.JSON(200, gin.H{"message": "Estado actualizado", "new_status": newStatus})
 }

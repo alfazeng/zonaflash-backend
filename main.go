@@ -39,14 +39,17 @@ type OfferResponse struct {
 
 // Vehículos (Para el usuario)
 type Vehicle struct {
-	ID       string `gorm:"primaryKey;type:uuid;default:gen_random_uuid()" json:"id"`
-	UserID   string `gorm:"index" json:"user_id"`
-	Type     string `json:"type"` // 'car' o 'moto'
-	Brand    string `json:"brand"`
-	Model    string `json:"model"`
-	Year     int    `json:"year"`
-	IsActive bool   `gorm:"default:true" json:"is_active"`
-	Status   string `gorm:"default:'APPROVED'" json:"status"` // 'PENDING_ADMIN_APPROVAL', 'APPROVED', 'REJECTED'
+	ID        string    `gorm:"primaryKey;type:uuid;default:gen_random_uuid()" json:"id"`
+	UserID    string    `gorm:"index" json:"user_id"`
+	UserEmail string    `json:"user_email"`
+	UserPhoto string    `json:"user_photo"`
+	Type      string    `json:"type"` // 'car' o 'moto'
+	Brand     string    `json:"brand"`
+	Model     string    `json:"model"`
+	Year      int       `json:"year"`
+	IsActive  bool      `gorm:"default:true" json:"is_active"`
+	Status    string    `gorm:"default:'SHADOW'" json:"status"` // 'SHADOW', 'ACTIVE', 'REJECTED'
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // Wallet (Billetera del usuario)
@@ -170,10 +173,11 @@ func createVehicle(c *gin.Context) {
 	}
 	// Inicializamos status según tipo
 	if v.Type == "moto" || v.Type == "car" {
-		v.Status = "PENDING_ADMIN_APPROVAL"
+		v.Status = "SHADOW"
 	} else {
-		v.Status = "APPROVED"
+		v.Status = "ACTIVE"
 	}
+	v.CreatedAt = time.Now()
 
 	// Guardar en DB
 	result := db.Create(&v)
@@ -538,7 +542,8 @@ func getTransactions(c *gin.Context) {
 }
 func getPendingVehicles(c *gin.Context) {
 	var vehicles []Vehicle
-	db.Where("status = ?", "PENDING_ADMIN_APPROVAL").Find(&vehicles)
+	// Traemos SHADOW y ACTIVE para que el switch pueda operar en ambos sentidos
+	db.Where("status IN ?", []string{"SHADOW", "ACTIVE"}).Order("created_at DESC").Limit(100).Find(&vehicles)
 	c.JSON(200, vehicles)
 }
 
@@ -552,9 +557,9 @@ func approveVehicle(c *gin.Context) {
 		return
 	}
 
-	newStatus := "APPROVED"
+	newStatus := "ACTIVE"
 	if req.Action == "reject" {
-		newStatus = "REJECTED"
+		newStatus = "SHADOW" // Volver a shadow o manejar REJECTED
 	}
 
 	var vehicle Vehicle
@@ -567,10 +572,11 @@ func approveVehicle(c *gin.Context) {
 	db.Save(&vehicle)
 
 	// PUSH NOTIFICATION SIMULATION
-	if newStatus == "APPROVED" {
-		log.Printf("🔔 [PUSH NOTIFICATION] Para Usuario %s: ¡Tu cuenta ha sido activada!", vehicle.UserID)
+	if newStatus == "ACTIVE" {
+		log.Printf("🔔 [SILENT PUSH] Para Usuario %s (%s): ¡Cuenta activada! [Timestamp: %s]",
+			vehicle.UserID, vehicle.UserEmail, time.Now().Format(time.RFC3339))
 	} else {
-		log.Printf("🔔 [PUSH NOTIFICATION] Para Usuario %s: Tu registro ha sido rechazado.", vehicle.UserID)
+		log.Printf("🔔 [SILENT PUSH] Para Usuario %s: Cuenta desactivada/Shadow.", vehicle.UserID)
 	}
 
 	c.JSON(200, gin.H{"message": "Estado actualizado", "new_status": newStatus})

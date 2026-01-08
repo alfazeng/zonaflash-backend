@@ -108,15 +108,17 @@ func main() {
 	}
 
 	// 0. Asegurar PostGIS
-	db.Exec("CREATE EXTENSION IF NOT EXISTS postgis;")
+	if err := db.Exec("CREATE EXTENSION IF NOT EXISTS postgis;").Error; err != nil {
+		log.Printf("⚠️ Warning PostGIS: %v", err)
+	}
 
-	// Migración automática (Crea tablas si no existen, útil como respaldo)
+	// Migración automática
 	db.AutoMigrate(&Vehicle{}, &Wallet{}, &Location{}, &Transaction{})
 
-	// Fix: Eliminar constraint de user_id si existe (MVP mode)
+	// Fix: Eliminar constraint de user_id si existe
 	db.Exec("ALTER TABLE wallets DROP CONSTRAINT IF EXISTS wallets_user_id_fkey;")
 
-	// --- MIGRACIÓN DE DATOS (PRODUCCIÓN) ---
+	// --- MIGRACIÓN DE DATOS ---
 	log.Println("🚀 Iniciando migración de datos para Status...")
 	db.Exec("UPDATE locations SET status = 'approved' WHERE status IS NULL OR status = 'pending';")
 	db.Exec("UPDATE offers SET status = 'active' WHERE status IS NULL;")
@@ -144,8 +146,7 @@ func main() {
 	r.GET("/api/offers", getNearbyOffers)            // Buscar ofertas
 	r.POST("/api/vehicles", createVehicle)           // Guardar vehículo
 	r.GET("/api/vehicles/:user_id", getUserVehicles) // Consultar vehículos
-	// Wallet
-	// Wallet
+
 	r.GET("/api/wallet/:user_id", getWallet)
 	r.POST("/api/wallet/redeem", requestRedeem)
 	// Hunter
@@ -238,7 +239,7 @@ func getNearbyOffers(c *gin.Context) {
 				0 as price, 
 				category,        -- Ya es texto
 				CASE 
-					WHEN category IN ('station_moto', 'station_car') THEN 'shadow'
+					WHEN category IN ('station_moto', 'station_car') AND (status IS NULL OR status = 'pending') THEN 'shadow'
 					WHEN status IS NULL OR status = '' THEN 'approved'
 					ELSE status 
 				END as status,   -- Aquí ya es texto
@@ -246,7 +247,7 @@ func getNearbyOffers(c *gin.Context) {
 				longitude,
 				ST_Distance(geom, ST_MakePoint(?, ?)::geography) as distance_meters
 			FROM locations
-			WHERE ST_DWithin(geom, ST_MakePoint(?, ?)::geography, ?)
+			WHERE ST_DWithin(geom, ST_SetSRID(ST_MakePoint(?, ?), 4326)::geography, ?)
 		)
 		ORDER BY distance_meters ASC LIMIT 50;`
 
@@ -307,20 +308,19 @@ func requestRedeem(c *gin.Context) {
 	c.JSON(200, gin.H{"message": "Solicitud recibida", "new_status": "pending"})
 }
 
+var authorizedUIDs = map[string]bool{
+	"wkq951i7vvhJbrZOQmUav6B28BZ2": true, // Admin 1
+	"DtfBh0Tr41fyjUwtcbl9WCBpgOJ2": true, // Usuario actual
+}
+
 func submitHuntHandler(c *gin.Context) {
 	// Ya no usamos JSON binding para este endpoint
 
 	// --- SEGURIDAD DE PRODUCCIÓN ---
-	// 1. Autorización: Administradores y Cazadores Oficiales
-	authorizedUIDs := map[string]bool{
-		"wkq951i7vvhJbrZOQmUav6B28BZ2": true, // Admin 1
-		"DtfBh0Tr41fyjUwtcbl9WCBpgOJ2": true, // Usuario actual
-	}
-
-	// Como es multipart/form-data, leemos los campos uno por uno o usamos una estructura
+	// Como es multipart/form-data, leemos los campos uno por uno
 	userID := c.PostForm("user_id")
 	if !authorizedUIDs[userID] {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Acceso denegado: ID de usuario no autorizado para capturas oficiales"})
+		c.JSON(http.StatusForbidden, gin.H{"error": "Usuario no autorizado para capturas"})
 		return
 	}
 
@@ -542,8 +542,8 @@ func getTransactions(c *gin.Context) {
 }
 func getPendingVehicles(c *gin.Context) {
 	var vehicles []Vehicle
-	// Traemos SHADOW y ACTIVE para que el switch pueda operar en ambos sentidos
-	db.Where("status IN ?", []string{"SHADOW", "ACTIVE"}).Order("created_at DESC").Limit(100).Find(&vehicles)
+	// Traemos todos los SHADOW y ACTIVE para gestión total
+	db.Order("created_at DESC").Find(&vehicles)
 	c.JSON(200, vehicles)
 }
 
@@ -559,7 +559,7 @@ func approveVehicle(c *gin.Context) {
 
 	newStatus := "ACTIVE"
 	if req.Action == "reject" {
-		newStatus = "SHADOW" // Volver a shadow o manejar REJECTED
+		newStatus = "SHADOW"
 	}
 
 	var vehicle Vehicle
@@ -569,15 +569,17 @@ func approveVehicle(c *gin.Context) {
 	}
 
 	vehicle.Status = newStatus
-	db.Save(&vehicle)
+	if err := db.Save(&vehicle).Error; err != nil {
+		c.JSON(500, gin.H{"error": "Error al actualizar estatus"})
+		return
+	}
 
 	// PUSH NOTIFICATION SIMULATION
-	if newStatus == "ACTIVE" {
-		log.Printf("🔔 [SILENT PUSH] Para Usuario %s (%s): ¡Cuenta activada! [Timestamp: %s]",
-			vehicle.UserID, vehicle.UserEmail, time.Now().Format(time.RFC3339))
-	} else {
-		log.Printf("🔔 [SILENT PUSH] Para Usuario %s: Cuenta desactivada/Shadow.", vehicle.UserID)
+	msg := fmt.Sprintf("¡Cuenta activada! [UID: %s]", vehicle.UserID)
+	if newStatus == "SHADOW" {
+		msg = fmt.Sprintf("Cuenta en revisión (Shadow) [UID: %s]", vehicle.UserID)
 	}
+	log.Printf("🔔 [SILENT PUSH] %s", msg)
 
 	c.JSON(200, gin.H{"message": "Estado actualizado", "new_status": newStatus})
 }

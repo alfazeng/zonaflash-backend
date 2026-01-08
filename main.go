@@ -113,6 +113,12 @@ func main() {
 	// Fix: Eliminar constraint de user_id si existe (MVP mode)
 	db.Exec("ALTER TABLE wallets DROP CONSTRAINT IF EXISTS wallets_user_id_fkey;")
 
+	// --- MIGRACIÓN DE DATOS (PRODUCCIÓN) ---
+	log.Println("🚀 Iniciando migración de datos para Status...")
+	db.Exec("UPDATE locations SET status = 'approved' WHERE status IS NULL OR status = 'pending';")
+	db.Exec("UPDATE offers SET status = 'active' WHERE status IS NULL;")
+	log.Println("✅ Migración completada.")
+
 	r := gin.Default()
 
 	// CORS (Permitir acceso desde la App)
@@ -229,6 +235,7 @@ func getNearbyOffers(c *gin.Context) {
 				category,        -- Ya es texto
 				CASE 
 					WHEN category IN ('station_moto', 'station_car') THEN 'shadow'
+					WHEN status IS NULL OR status = '' THEN 'approved'
 					ELSE status 
 				END as status,   -- Aquí ya es texto
 				latitude, 

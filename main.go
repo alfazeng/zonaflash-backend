@@ -49,6 +49,8 @@ type Vehicle struct {
 	Year      int       `json:"year"`
 	IsActive  bool      `gorm:"default:true" json:"is_active"`
 	Status    string    `gorm:"default:'SHADOW'" json:"status"` // 'SHADOW', 'ACTIVE', 'REJECTED'
+	Role      string    `gorm:"default:'driver'" json:"role"`   // 'driver', 'station_admin'
+	StationID string    `json:"station_id"`                     // ID de la estación vinculada
 	CreatedAt time.Time `json:"created_at"`
 }
 
@@ -77,6 +79,8 @@ type Location struct {
 	IsShadow         bool        `json:"is_shadow"`
 	ActivationStatus string      `json:"activation_status"`
 	AssetType        string      `json:"asset_type"`
+	DailyPIN         string      `json:"daily_pin"`
+	PINUpdatedAt     time.Time   `json:"pin_updated_at"`
 	Geom             interface{} `gorm:"type:geography(POINT,4326)" json:"-"`
 }
 
@@ -146,6 +150,7 @@ func main() {
 	r.GET("/api/offers", getNearbyOffers)            // Buscar ofertas
 	r.POST("/api/vehicles", createVehicle)           // Guardar vehículo
 	r.GET("/api/vehicles/:user_id", getUserVehicles) // Consultar vehículos
+	r.POST("/api/vehicles/activate-with-pin", activateWithPIN)
 
 	r.GET("/api/wallet/:user_id", getWallet)
 	r.POST("/api/wallet/redeem", requestRedeem)
@@ -156,6 +161,8 @@ func main() {
 	// Admin
 	r.GET("/api/admin/pending-vehicles", getPendingVehicles)
 	r.POST("/api/admin/approve-vehicle", approveVehicle)
+	r.GET("/api/admin/stations", getMapStations) // Ver todas las estaciones
+	r.POST("/api/admin/setup-b2b", setupB2B)     // Vincular socio a estación
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -172,11 +179,14 @@ func createVehicle(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	// Inicializamos status según tipo
+	// SEGURIDAD: Todo vehículo de conductor nace como SHADOW
 	if v.Type == "moto" || v.Type == "car" {
 		v.Status = "SHADOW"
+		v.IsActive = false
 	} else {
+		// Pasajeros o tipos genéricos (si existen) nacen activos
 		v.Status = "ACTIVE"
+		v.IsActive = true
 	}
 	v.CreatedAt = time.Now()
 
@@ -193,7 +203,89 @@ func getUserVehicles(c *gin.Context) {
 	userID := c.Param("user_id")
 	var vehicles []Vehicle
 	db.Where("user_id = ?", userID).Find(&vehicles)
-	c.JSON(200, vehicles)
+
+	// SEGURIDAD B2B: Si el usuario es station_admin, incluimos el PIN en el JSON de respuesta
+	// Usamos un mapa para la respuesta para poder inyectar campos dinámicos sin tocar el struct global
+	var response []map[string]interface{}
+	for _, v := range vehicles {
+		vMap := map[string]interface{}{
+			"id":         v.ID,
+			"user_id":    v.UserID,
+			"type":       v.Type,
+			"brand":      v.Brand,
+			"model":      v.Model,
+			"status":     v.Status,
+			"role":       v.Role,
+			"station_id": v.StationID,
+		}
+
+		if v.Role == "station_admin" && v.StationID != "" {
+			var loc Location
+			if err := db.First(&loc, "id = ?", v.StationID).Error; err == nil {
+				vMap["station_pin"] = ensureDailyPIN(&loc)
+			}
+		}
+		response = append(response, vMap)
+	}
+
+	c.JSON(200, response)
+}
+
+func ensureDailyPIN(loc *Location) string {
+	now := time.Now()
+	// Si el PIN no existe o es de un día distinto (Daily Reset)
+	if loc.DailyPIN == "" || loc.PINUpdatedAt.Year() != now.Year() || loc.PINUpdatedAt.YearDay() != now.YearDay() {
+		// Generación de 4 dígitos determinista pero fresca para el día
+		seed := now.UnixNano()
+		pin := fmt.Sprintf("%04d", seed%10000)
+		loc.DailyPIN = pin
+		loc.PINUpdatedAt = now
+		db.Model(loc).Updates(map[string]interface{}{
+			"daily_pin":      pin,
+			"pin_updated_at": now,
+		})
+	}
+	return loc.DailyPIN
+}
+
+func activateWithPIN(c *gin.Context) {
+	var req struct {
+		UserID string `json:"user_id"`
+		PIN    string `json:"pin"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(400, gin.H{"error": "Faltan datos"})
+		return
+	}
+
+	var v Vehicle
+	if err := db.First(&v, "user_id = ?", req.UserID).Error; err != nil {
+		c.JSON(404, gin.H{"error": "Usuario no encontrado"})
+		return
+	}
+
+	if v.StationID == "" {
+		c.JSON(403, gin.H{"error": "No estás vinculado a ninguna parada. Contacta a soporte."})
+		return
+	}
+
+	var loc Location
+	if err := db.First(&loc, "id = ?", v.StationID).Error; err != nil {
+		c.JSON(500, gin.H{"error": "Error consultando parada"})
+		return
+	}
+
+	currentPIN := ensureDailyPIN(&loc)
+	if req.PIN != currentPIN {
+		c.JSON(401, gin.H{"error": "PIN caducado o incorrecto. Pide el código del día a tu jefe de parada."})
+		return
+	}
+
+	// ACTIVACIÓN EXITOSA
+	v.Status = "ACTIVE"
+	db.Save(&v)
+
+	c.JSON(200, gin.H{"message": "¡Activación exitosa! Bienvenido a la red.", "status": "ACTIVE"})
 }
 
 func getNearbyOffers(c *gin.Context) {
@@ -582,4 +674,53 @@ func approveVehicle(c *gin.Context) {
 	log.Printf("🔔 [SILENT PUSH] %s", msg)
 
 	c.JSON(200, gin.H{"message": "Estado actualizado", "new_status": newStatus})
+}
+
+func getMapStations(c *gin.Context) {
+	var stations []Location
+	// Solo estaciones reales
+	db.Where("category IN ?", []string{"station_moto", "station_car"}).Find(&stations)
+	c.JSON(http.StatusOK, stations)
+}
+
+func setupB2B(c *gin.Context) {
+	var req struct {
+		UserID       string `json:"user_id"`
+		StationID    string `json:"station_id"`
+		OfficialName string `json:"official_name"`
+		Role         string `json:"role"` // 'driver' o 'station_admin'
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(400, gin.H{"error": "Datos inválidos"})
+		return
+	}
+
+	tx := db.Begin()
+
+	// 1. Actualizar Rol y Estación en el vehículo
+	if err := tx.Model(&Vehicle{}).Where("user_id = ?", req.UserID).Updates(map[string]interface{}{
+		"role":       req.Role,
+		"station_id": req.StationID,
+		"status":     "ACTIVE",
+	}).Error; err != nil {
+		tx.Rollback()
+		c.JSON(500, gin.H{"error": "Error al actualizar usuario"})
+		return
+	}
+
+	// 2. Si se vincula a una estación, actualizar la estación
+	if req.StationID != "" {
+		if err := tx.Model(&Location{}).Where("id = ?", req.StationID).Updates(map[string]interface{}{
+			"shop_name": req.OfficialName,
+			"status":    "approved", // Activamos la parada en el mapa
+		}).Error; err != nil {
+			tx.Rollback()
+			c.JSON(500, gin.H{"error": "Error al actualizar estación"})
+			return
+		}
+	}
+
+	tx.Commit()
+	c.JSON(200, gin.H{"message": "Gestión B2B completada exitosamente"})
 }
